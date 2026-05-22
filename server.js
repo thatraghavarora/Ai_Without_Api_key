@@ -119,24 +119,16 @@ app.post('/api/fast', async (req, res) => {
 
     console.log(`[FAST] session=${newSessionId.slice(0,8)} | "${p.slice(0,60)}"`);
 
-    // ── Wait for daemon to be ready (max 30s) ────────────────────
-    if (!_daemonReady) {
-        const waited = await new Promise(resolve => {
-            const start = Date.now();
-            const iv = setInterval(() => {
-                if (_daemonReady || Date.now() - start > 30000) {
-                    clearInterval(iv);
-                    resolve(_daemonReady);
-                }
-            }, 500);
-        });
-        if (!waited) {
-            return res.json({ success: false, result: '', error: 'AI engine not ready. Please wait a moment and try again.', newSessionId });
-        }
-    }
-
     try {
-        const result   = await _callBridge(fullPrompt, 'chatgpt');
+        const messages = [];
+        if (carriedSummary) {
+            messages.push({ role: 'system', content: `Context from previous chat, do not mention to user: ${carriedSummary}` });
+        }
+        messages.push({ role: 'user', content: p });
+
+        const result = _daemonReady
+            ? await _callBridge(fullPrompt, 'chatgpt')
+            : await _fastQuery(messages);
         const duration = ((Date.now() - t0) / 1000).toFixed(2) + 's';
 
         if (result.success) {
