@@ -119,21 +119,11 @@ app.post('/api/fast', async (req, res) => {
 
     console.log(`[FAST] session=${newSessionId.slice(0,8)} | "${p.slice(0,60)}"`);
 
-    // Wait for daemon (up to 30s on first startup)
-    if (!_daemonReady) {
-        const ok = await new Promise(resolve => {
-            const t = Date.now();
-            const iv = setInterval(() => {
-                if (_daemonReady || Date.now() - t > 30000) { clearInterval(iv); resolve(_daemonReady); }
-            }, 300);
-        });
-        if (!ok) {
-            return res.json({ success: false, result: '', error: 'AI engine starting up, please try again in a moment.', duration: '0s', newSessionId });
-        }
-    }
-
     try {
-        const result   = await _callBridge(fullPrompt, 'chatgpt');
+        // Use daemon if ready, otherwise fall back to direct HTTP immediately
+        const result = _daemonReady
+            ? await _callBridge(fullPrompt, 'chatgpt')
+            : await _fastQuery(p + (carriedSummary ? `\n[Context: ${carriedSummary}]` : ''));
         const duration = ((Date.now() - t0) / 1000).toFixed(2) + 's';
 
         if (result.success) {
@@ -144,16 +134,13 @@ app.post('/api/fast', async (req, res) => {
             _microSummarise(newSessionId, p, result.result);
         }
 
-        console.log(`[FAST] Done in ${duration} via ${result.provider || 'g4f'}`);
+        console.log(`[FAST] Done in ${duration} via ${result.provider || 'unknown'}`);
         res.json({ ...result, duration, newSessionId });
     } catch (e) {
         console.log('[FAST] Error:', e.message);
         res.json({ success: false, result: '', error: 'Request failed: ' + e.message, duration: '0s', newSessionId });
     }
 });
-
-
-
 
 
 
@@ -379,39 +366,19 @@ function _lastUserMsg(messages) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  _fastQuery — ChatGPT via PollinationsAI
-//  Rate-limit safe: retries with cooldown, throttled requests
+//  _fastQuery — direct PollinationsAI (used when daemon not available)
+//  No retries, no delays — Railway has fresh IP, just race endpoints
 // ══════════════════════════════════════════════════════════════════
-let _lastRequestTime = 0;     // throttle
-let _rateLimitUntil  = 0;     // cooldown after 429
+async function _fastQuery(userText) {
+    const enc = encodeURIComponent(userText);
 
-async function _fastQuery(messages, attempt = 0) {
-    const userText = _lastUserMsg(messages);
-    const now      = Date.now();
-
-    // ── Rate-limit cooldown: if recently 429'd, wait it out ────────
-    if (_rateLimitUntil > now) {
-        const wait = _rateLimitUntil - now;
-        console.log(`[FAST] Rate-limit cooldown: waiting ${wait}ms`);
-        await new Promise(r => setTimeout(r, wait));
-    }
-
-    // ── Throttle: min 800ms between requests ────────────────────
-    const sinceLastReq = Date.now() - _lastRequestTime;
-    if (sinceLastReq < 800 && _lastRequestTime > 0) {
-        await new Promise(r => setTimeout(r, 800 - sinceLastReq));
-    }
-    _lastRequestTime = Date.now();
-
-    // Helper: POST with a specific model
     function tryPost(model) {
         return fetch('https://text.pollinations.ai/openai', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ model, messages, stream: false }),
-            signal:  AbortSignal.timeout(35000),
+            body:    JSON.stringify({ model, messages: [{ role: 'user', content: userText }], stream: false }),
+            signal:  AbortSignal.timeout(20000),
         }).then(async r => {
-            if (r.status === 429) throw new Error('rate-limited');
             if (!r.ok) throw new Error(`status ${r.status}`);
             const d = await r.json();
             const t = d?.choices?.[0]?.message?.content?.trim();
@@ -420,14 +387,11 @@ async function _fastQuery(messages, attempt = 0) {
         });
     }
 
-    // Helper: GET endpoint (different rate-limit bucket)
     function tryGet(seed) {
-        const enc = encodeURIComponent(userText);
         return fetch(
             `https://text.pollinations.ai/${enc}?model=openai&seed=${seed}&nologo=true`,
-            { signal: AbortSignal.timeout(30000) }
+            { signal: AbortSignal.timeout(20000) }
         ).then(async r => {
-            if (r.status === 429) throw new Error('rate-limited');
             if (!r.ok) throw new Error(`status ${r.status}`);
             const t = (await r.text()).trim();
             if (!t || t.length < 3 || t.startsWith('<') || t.startsWith('data:')) throw new Error('invalid');
@@ -435,30 +399,15 @@ async function _fastQuery(messages, attempt = 0) {
         });
     }
 
-    // Race all endpoints
     try {
-        const winner = await Promise.any([
+        return await Promise.any([
             tryPost('openai'),
             tryPost('openai-large'),
             tryGet(Date.now()),
-            tryGet(Math.floor(Math.random() * 9999)),
+            tryGet(Math.floor(Math.random() * 99999)),
         ]);
-        return winner;
-    } catch (aggErr) {
-        const errs  = aggErr?.errors?.map(e => e.message) || [];
-        const allRL = errs.every(e => e === 'rate-limited');
-
-        if (allRL && attempt < 2) {
-            // All 429 — wait 5s and retry
-            const delay = (attempt + 1) * 5000;
-            _rateLimitUntil = Date.now() + delay;
-            console.log(`[FAST] All rate-limited — retry #${attempt + 1} after ${delay}ms`);
-            await new Promise(r => setTimeout(r, delay));
-            return _fastQuery(messages, attempt + 1);
-        }
-
-        console.log('[FAST] Failed:', errs.join(' | '));
-        return { success: false, result: '', error: 'ChatGPT busy. Please try again in a moment.' };
+    } catch {
+        return { success: false, result: '', error: 'ChatGPT unavailable. Please try again.' };
     }
 }
 
