@@ -643,6 +643,7 @@ function _runBridge(jobId, prompt, headless) {
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Start ────────────────────────────────────────────────────────
+if (!process.env.VERCEL) {
 app.listen(PORT, () => {
     console.log(`
 =======================================================
@@ -656,5 +657,6 @@ app.listen(PORT, () => {
     // Start persistent daemon (pre-loads g4f once for all requests)
     _startDaemon();
 });
+}
 
-
+export default app;
