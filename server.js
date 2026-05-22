@@ -366,48 +366,81 @@ function _lastUserMsg(messages) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  _fastQuery — direct PollinationsAI (used when daemon not available)
-//  No retries, no delays — Railway has fresh IP, just race endpoints
+//  _fastQuery — multiple free providers, no API key needed
+//  All race in parallel, first valid response wins
 // ══════════════════════════════════════════════════════════════════
 async function _fastQuery(userText) {
-    const enc = encodeURIComponent(userText);
 
-    function tryPost(model) {
-        return fetch('https://text.pollinations.ai/openai', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ model, messages: [{ role: 'user', content: userText }], stream: false }),
-            signal:  AbortSignal.timeout(20000),
-        }).then(async r => {
-            if (!r.ok) throw new Error(`status ${r.status}`);
-            const d = await r.json();
-            const t = d?.choices?.[0]?.message?.content?.trim();
-            if (!t || t.length < 3) throw new Error('empty');
-            return { success: true, result: t, provider: 'ChatGPT' };
-        });
-    }
-
-    function tryGet(seed) {
+    // ── Provider 1 & 2: PollinationsAI GET (fast, sometimes rate-limited) ──
+    function tryPollinations(seed) {
+        const enc = encodeURIComponent(userText.slice(0, 800));
         return fetch(
             `https://text.pollinations.ai/${enc}?model=openai&seed=${seed}&nologo=true`,
             { signal: AbortSignal.timeout(20000) }
         ).then(async r => {
-            if (!r.ok) throw new Error(`status ${r.status}`);
+            if (!r.ok) throw new Error(`poll ${r.status}`);
             const t = (await r.text()).trim();
-            if (!t || t.length < 3 || t.startsWith('<') || t.startsWith('data:')) throw new Error('invalid');
+            if (!t || t.length < 5 || t.startsWith('<') || t.startsWith('data:')) throw new Error('invalid');
+            return { success: true, result: t, provider: 'ChatGPT' };
+        });
+    }
+
+    // ── Provider 3: DuckDuckGo AI Chat (GPT-4o-mini, very reliable) ──
+    async function tryDuckDuckGo() {
+        // Step 1: get VQD token
+        const st = await fetch('https://duckduckgo.com/duckchat/v1/status', {
+            headers: { 'x-vqd-accept': '1' },
+            signal: AbortSignal.timeout(8000),
+        });
+        const vqd = st.headers.get('x-vqd-4');
+        if (!vqd) throw new Error('no vqd');
+
+        // Step 2: send message (SSE response)
+        const r = await fetch('https://duckduckgo.com/duckchat/v1/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-vqd-4': vqd },
+            body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: userText }] }),
+            signal: AbortSignal.timeout(25000),
+        });
+        if (!r.ok) throw new Error(`ddg ${r.status}`);
+
+        const raw  = await r.text();
+        let   full = '';
+        for (const line of raw.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const chunk = line.slice(6).trim();
+            if (chunk === '[DONE]') break;
+            try { const obj = JSON.parse(chunk); if (obj.message) full += obj.message; } catch {}
+        }
+        if (!full || full.length < 5) throw new Error('empty ddg');
+        return { success: true, result: full, provider: 'ChatGPT (DDG)' };
+    }
+
+    // ── Provider 4: PollinationsAI POST ──
+    function tryPollinationsPost() {
+        return fetch('https://text.pollinations.ai/openai', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ model: 'openai', messages: [{ role: 'user', content: userText }], stream: false }),
+            signal:  AbortSignal.timeout(20000),
+        }).then(async r => {
+            if (!r.ok) throw new Error(`post ${r.status}`);
+            const d = await r.json();
+            const t = d?.choices?.[0]?.message?.content?.trim();
+            if (!t || t.length < 5) throw new Error('empty');
             return { success: true, result: t, provider: 'ChatGPT' };
         });
     }
 
     try {
         return await Promise.any([
-            tryPost('openai'),
-            tryPost('openai-large'),
-            tryGet(Date.now()),
-            tryGet(Math.floor(Math.random() * 99999)),
+            tryPollinations(Date.now()),
+            tryPollinations(Math.floor(Math.random() * 99999)),
+            tryDuckDuckGo(),
+            tryPollinationsPost(),
         ]);
     } catch {
-        return { success: false, result: '', error: 'ChatGPT unavailable. Please try again.' };
+        return { success: false, result: '', error: 'All AI providers unavailable. Please try again in a moment.' };
     }
 }
 
