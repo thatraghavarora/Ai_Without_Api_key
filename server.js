@@ -119,16 +119,21 @@ app.post('/api/fast', async (req, res) => {
 
     console.log(`[FAST] session=${newSessionId.slice(0,8)} | "${p.slice(0,60)}"`);
 
-    try {
-        const messages = [];
-        if (carriedSummary) {
-            messages.push({ role: 'system', content: `Context from previous chat, do not mention to user: ${carriedSummary}` });
+    // Wait for daemon (up to 30s on first startup)
+    if (!_daemonReady) {
+        const ok = await new Promise(resolve => {
+            const t = Date.now();
+            const iv = setInterval(() => {
+                if (_daemonReady || Date.now() - t > 30000) { clearInterval(iv); resolve(_daemonReady); }
+            }, 300);
+        });
+        if (!ok) {
+            return res.json({ success: false, result: '', error: 'AI engine starting up, please try again in a moment.', duration: '0s', newSessionId });
         }
-        messages.push({ role: 'user', content: p });
+    }
 
-        const result = _daemonReady
-            ? await _callBridge(fullPrompt, 'chatgpt')
-            : await _fastQuery(messages);
+    try {
+        const result   = await _callBridge(fullPrompt, 'chatgpt');
         const duration = ((Date.now() - t0) / 1000).toFixed(2) + 's';
 
         if (result.success) {
@@ -143,9 +148,11 @@ app.post('/api/fast', async (req, res) => {
         res.json({ ...result, duration, newSessionId });
     } catch (e) {
         console.log('[FAST] Error:', e.message);
-        res.json({ success: false, result: '', error: 'Request failed: ' + e.message, newSessionId });
+        res.json({ success: false, result: '', error: 'Request failed: ' + e.message, duration: '0s', newSessionId });
     }
 });
+
+
 
 
 
