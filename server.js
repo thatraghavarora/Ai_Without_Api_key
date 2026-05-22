@@ -385,27 +385,24 @@ async function _fastQuery(userText) {
         });
     }
 
-    // ── Provider 3: DuckDuckGo AI Chat (GPT-4o-mini, very reliable) ──
+    // ── Provider 3: DuckDuckGo AI (GPT-4o-mini) ──────────────────
     async function tryDuckDuckGo() {
-        // Step 1: get VQD token
+        const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36';
         const st = await fetch('https://duckduckgo.com/duckchat/v1/status', {
-            headers: { 'x-vqd-accept': '1' },
+            headers: { 'x-vqd-accept': '1', 'User-Agent': UA },
             signal: AbortSignal.timeout(8000),
         });
         const vqd = st.headers.get('x-vqd-4');
         if (!vqd) throw new Error('no vqd');
-
-        // Step 2: send message (SSE response)
         const r = await fetch('https://duckduckgo.com/duckchat/v1/chat', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-vqd-4': vqd },
+            headers: { 'Content-Type': 'application/json', 'x-vqd-4': vqd, 'User-Agent': UA },
             body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: userText }] }),
             signal: AbortSignal.timeout(25000),
         });
         if (!r.ok) throw new Error(`ddg ${r.status}`);
-
-        const raw  = await r.text();
-        let   full = '';
+        const raw = await r.text();
+        let full = '';
         for (const line of raw.split('\n')) {
             if (!line.startsWith('data: ')) continue;
             const chunk = line.slice(6).trim();
@@ -416,7 +413,44 @@ async function _fastQuery(userText) {
         return { success: true, result: full, provider: 'ChatGPT (DDG)' };
     }
 
-    // ── Provider 4: PollinationsAI POST ──
+    // ── Provider 4: GizAI ─────────────────────────────────────────
+    async function tryGizAI() {
+        const r = await fetch('https://app.giz.ai/api/data/users/inferenceApi', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'chat_completions', input: { conversation: [{ content: userText, role: 'user' }], lang: 'en' } }),
+            signal: AbortSignal.timeout(20000),
+        });
+        if (!r.ok) throw new Error(`giz ${r.status}`);
+        const d = await r.json();
+        const t = d?.output?.trim();
+        if (!t || t.length < 5) throw new Error('empty giz');
+        return { success: true, result: t, provider: 'GizAI' };
+    }
+
+    // ── Provider 5: Blackbox AI ───────────────────────────────────
+    async function tryBlackbox() {
+        const r = await fetch('https://www.blackbox.ai/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                messages: [{ id: '1', content: userText, role: 'user' }],
+                id: '1', previewToken: null, userId: null,
+                codeModelMode: true, agentMode: {}, trendingAgentMode: {},
+                isMicMode: false, maxTokens: 1024, isChromeExt: false,
+            }),
+            signal: AbortSignal.timeout(20000),
+        });
+        if (!r.ok) throw new Error(`bb ${r.status}`);
+        const text = await r.text();
+        const clean = text.split('\n')
+            .filter(l => l && !l.includes('$@$') && !l.includes('searchresults') && !l.startsWith('data:'))
+            .join('\n').trim();
+        if (!clean || clean.length < 5) throw new Error('empty bb');
+        return { success: true, result: clean, provider: 'Blackbox AI' };
+    }
+
+    // ── Provider 6: PollinationsAI POST ──────────────────────────
     function tryPollinationsPost() {
         return fetch('https://text.pollinations.ai/openai', {
             method:  'POST',
@@ -437,6 +471,8 @@ async function _fastQuery(userText) {
             tryPollinations(Date.now()),
             tryPollinations(Math.floor(Math.random() * 99999)),
             tryDuckDuckGo(),
+            tryGizAI(),
+            tryBlackbox(),
             tryPollinationsPost(),
         ]);
     } catch {
