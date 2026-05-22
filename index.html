@@ -203,7 +203,10 @@
 
 </div>
 <script>
-const API = 'http://localhost:3000';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+  ? 'http://localhost:3000'
+  : window.location.origin;
+
 
 // Rolling session state (persists across page reloads)
 let lastSessionId = localStorage.getItem('last_session_id') || null;
