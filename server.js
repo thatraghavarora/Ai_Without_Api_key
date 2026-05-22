@@ -279,8 +279,14 @@ let   _daemon      = null;
 let   _daemonReady = false;
 const _pending     = new Map();   // reqId → { resolve, reject, timer }
 let   _daemonBuf   = '';
+const SHOULD_START_DAEMON = !process.env.VERCEL && !process.env.RAILWAY_ENVIRONMENT && !process.env.RAILWAY_SERVICE_NAME;
 
 function _startDaemon() {
+    if (!SHOULD_START_DAEMON) {
+        console.log('[DAEMON] Disabled in hosted Node deployment; using HTTP AI providers');
+        return;
+    }
+
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
     _daemon = spawn(pythonCmd, [
         path.join(__dirname, 'bridge_daemon.py'),
@@ -331,7 +337,7 @@ function _startDaemon() {
         console.log(`[DAEMON] Exited (code ${code}) — restarting in 2s`);
         _daemonReady = false;
         _daemon      = null;
-        setTimeout(_startDaemon, 2000);
+        if (SHOULD_START_DAEMON) setTimeout(_startDaemon, 2000);
     });
 
     _daemon.on('error', e => console.error('[DAEMON] Spawn error:', e.message));
@@ -666,13 +672,17 @@ app.listen(PORT, () => {
 =======================================================
   AI Chat API  |  http://localhost:${PORT}
 =======================================================
-  POST /api/fast   <- Web UI chat (Python g4f bridge)
+  POST /api/fast   <- Web UI chat (hosted HTTP providers)
   GET  /api/status <- health check
   GET  /           <- Web UI
 =======================================================
 `);
-    // Start persistent daemon (pre-loads g4f once for all requests)
-    _startDaemon();
+    if (SHOULD_START_DAEMON) {
+        // Start persistent daemon locally only; hosted deploys use HTTP providers.
+        _startDaemon();
+    } else {
+        console.log('[DAEMON] Skipped for hosted deployment');
+    }
 });
 }
 
